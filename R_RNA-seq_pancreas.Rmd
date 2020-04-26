@@ -1,0 +1,246 @@
+---
+title: "hackaton_RNAseq"
+author: "Felix Pacheco"
+date: "4/24/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+#Libraries
+library(DESeq2)
+library(CePa)
+library(readxl)
+```
+
+#Data Loading and formatting
+
+```{r}
+setwd("/Users/felix_pacheco/Desktop/")
+
+#RNA-seq data
+df_raw <- as.data.frame(read.table("pancreas.tsv"))
+
+df_expr <- df_raw
+
+#Removal of description column
+df_expr <- df_expr[,-2]
+
+#Attributes data loading
+df_attr  <- read_excel("attributes.xlsx")
+
+#Substring names of columns to match df_attr sample ID names (only liver tissue samples)
+
+names(df_expr) <- substring(names(df_expr),1,15)
+names(df_expr) <- gsub("[.]", "-", names(df_expr))
+names(df_expr) <- gsub("\\-$", "", names(df_expr))
+```
+
+
+#Data subsetting to get RNA-seq profiles of liver tissues
+
+```{r}
+#Subset df_expr to match df_attr IDs
+#df_expr_ <- df_expr[,colnames(df_expr) %in% df_attr$Tissue.Sample.ID_liver] 
+
+library(stringr)
+#Subset df_expr to match the RNA-seq available data
+df_attr$SAMPID_pancreas <- substring(df_attr$SAMPID_pancreas, 1, 15)
+df_attr$SAMPID_pancreas <- gsub("\\-$", "", df_attr$SAMPID_pancreas)
+
+df_attr$SAMPID_liver <- substring(df_attr$SAMPID_liver, 1, 15)
+df_attr$SAMPID_liver <- gsub("\\-$", "", df_attr$SAMPID_liver)
+
+
+df_attr_withRNA <- df_attr[df_attr$SAMPID_pancreas %in% colnames(df_expr),] 
+df_attr_withRNA2 <- df_attr[df_attr$SAMPID_liver %in% colnames(df_expr),] 
+
+
+ggplot(, aes(depth, fill = cut, colour = cut)) + geom_density(alpha = 0.1)
+
+
+
+
+
+df_density <- as.data.frame(cbind(df_attr_withRNA$`Fat,Percentage_liver`, df_attr_withRNA$`Fat,Percentage_pancreas`))
+names(df_density) <- c("Liver","Pancreas")
+df_density <- melt(df_density)
+
+mu <- ddply(df_density, "variable", summarise, grp.mean=mean(value))
+ggplot(df_density, aes(value, color=variable, fill = variable)) + geom_density(alpha=0.6) +geom_vline(data=mu, aes(xintercept=grp.mean, color=variable), linetype="dashed")+scale_color_viridis(discrete=TRUE) +theme_classic() + scale_fill_viridis(discrete=TRUE)
+
+
+
+ggplot( data = melt(df_density)+ aes(x=value, color=variable, fill=variable))# + geom_density(alpha=0.6) + scale_fill_viridis(discrete=TRUE) + scale_color_viridis(discrete=TRUE) +theme_ipsum() +theme(legend.position="none") +ylab("") +xlab("Assigned Probability (%)")
+
+```
+
+# Subset data according to liver fat content
+
+```{r}
+
+#Subdivision in two groups according to fat percentage: Normal liver fat percentage and excessive liver fat percentage
+
+#Extract ids for both groups
+
+#Low fat group
+lower_fat <- df_attr_withRNA[ which(df_attr_withRNA$`Fat,Percentage_pancreas` <= 15),]
+lower_fat$SAMPID_pancreas <- substr(lower_fat$SAMPID_pancreas, 1, 15)
+lower_ids <- lower_fat$SAMPID_pancreas
+
+#High fat group
+upper_fat <- df_attr_withRNA[ which(df_attr_withRNA$`Fat,Percentage_pancreas` >= 15),]
+upper_fat$SAMPID_pancreas <- substr(upper_fat$SAMPID_pancreas, 1, 15)
+upper_ids <- upper_fat$Tissue.Sample.ID_pancreas
+
+
+#Label columns according to their group belonging
+
+#Label low fat group
+
+found <- match(colnames(df_expr), lower_ids, nomatch = 0)
+replace_with_these <- paste(lower_ids, "_lowfat", sep="")
+colnames(df_expr)[colnames(df_expr) %in% lower_ids] <- replace_with_these[found]
+
+#Label high fat grouo
+
+found <- match(colnames(df_expr), upper_ids, nomatch = 0)
+replace_with_these <- paste(upper_ids, "_highfat", sep="")
+colnames(df_expr)[colnames(df_expr) %in% upper_ids] <- replace_with_these[found]
+```
+
+
+
+#Analysis with DESeq2
+
+```{r}
+
+#Input format requirement
+rownames(df_expr) <- df_expr$Name
+df_expr$Name <- NULL
+
+countdata <- as.matrix(df_expr)
+head(countdata)
+
+#We label the data object
+
+condition <-factor(substring(colnames(df_expr), first = 16, last = 23))
+condition <- gsub("^\\_", "", condition)
+condition[-1]
+(coldata <- data.frame(row.names=colnames(countdata), condition))
+
+#DESeq object creation
+dds <- DESeqDataSetFromMatrix(countData=countdata, colData=coldata, design=~condition)
+dds
+
+#DESeq Analysis
+dds <- DESeq(dds)
+
+#Dispersion plot
+plotDispEsts(dds, main="Dispersion plot")
+
+#Regularization/log transformation
+rld <- rlogTransformation(dds)
+head(assay(rld))
+hist(assay(rld))
+
+# Colors for plots below
+## Ugly:
+## (mycols <- 1:length(unique(condition)))
+## Use RColorBrewer, better
+library(RColorBrewer)
+(mycols <- brewer.pal(8, "Dark2")[1:length(unique(condition))])
+
+# Sample distance heatmap
+sampleDists <- as.matrix(dist(t(assay(rld))))
+library(gplots)
+heatmap.2(as.matrix(sampleDists), key=F, trace="none",
+          col=colorpanel(100, "black", "white"),
+          ColSideColors=mycols[condition], RowSideColors=mycols[condition],
+          margin=c(10, 10), main="Sample Distance Matrix")
+
+maplot <- function (res, thresh=0.05, labelsig=TRUE, textcx=1, ...) {
+  with(res, plot(baseMean, log2FoldChange, pch=20, cex=.5, log="x", ...))
+  with(subset(res, padj<thresh), points(baseMean, log2FoldChange, col="red", pch=20, cex=1.5))
+  if (labelsig) {
+    require(calibrate)
+    with(subset(res, padj<thresh), textxy(baseMean, log2FoldChange, labs=Gene, cex=textcx, col=2))
+  }
+}
+DESeq2::plotPCA(rld, intgroup="condition")
+
+
+#PCA
+
+rld_pca <- function (rld, intgroup = "condition", ntop = 500, colors=NULL, legendpos="bottomleft", main="PCA Biplot", textcx=1, ...) {
+  require(genefilter)
+  require(calibrate)
+  require(RColorBrewer)
+  rv = rowVars(assay(rld))
+  select = order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+  pca = prcomp(t(assay(rld)[select, ]))
+  fac = factor(apply(as.data.frame(colData(rld)[, intgroup, drop = FALSE]), 1, paste, collapse = " : "))
+  if (is.null(colors)) {
+    if (nlevels(fac) >= 3) {
+      colors = brewer.pal(nlevels(fac), "Paired")
+    }   else {
+      colors = c("black", "red")
+    }
+  }
+  pc1var <- round(summary(pca)$importance[2,1]*100, digits=1)
+  pc2var <- round(summary(pca)$importance[2,2]*100, digits=1)
+  pc1lab <- paste0("PC1 (",as.character(pc1var),"%)")
+  pc2lab <- paste0("PC1 (",as.character(pc2var),"%)")
+  plot(PC2~PC1, data=as.data.frame(pca$x), bg=colors[fac], pch=21, xlab=pc1lab, ylab=pc2lab, main=main, ...)
+  with(as.data.frame(pca$x), textxy(PC1, PC2, labs=rownames(as.data.frame(pca$x)), cex=textcx))
+  legend(legendpos, legend=levels(fac), col=colors, pch=20)
+  #     rldyplot(PC2 ~ PC1, groups = fac, data = as.data.frame(pca$rld),
+  #            pch = 16, cerld = 2, aspect = "iso", col = colours, main = draw.key(key = list(rect = list(col = colours),
+  #                                                                                         terldt = list(levels(fac)), rep = FALSE)))
+}
+
+rld_pca(rld, colors=mycols, intgroup="condition")
+
+
+res <- results(dds)
+table(res$padj<0.05)
+## Order by adjusted p-value
+res <- res[order(res$padj), ]
+## Merge with normalized count data
+resdata <- merge(as.data.frame(res), as.data.frame(counts(dds, normalized=TRUE)), by="row.names", sort=FALSE)
+names(resdata)[1] <- "Gene"
+head(resdata)
+
+maplot(resdata, main="MA Plot")
+
+
+hist(res$pvalue, breaks=50, col="grey")
+DESeq2::plotMA(dds)
+
+
+
+volcanoplot <- function (res, lfcthresh=2, sigthresh=0.05, main="Volcano Plot", legendpos="bottomright", labelsig=TRUE, textcx=1, ...) {
+  with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main=main, ...))
+  with(subset(res, padj<sigthresh ), points(log2FoldChange, -log10(pvalue), pch=20, col="red", ...))
+  with(subset(res, abs(log2FoldChange)>lfcthresh), points(log2FoldChange, -log10(pvalue), pch=20, col="orange", ...))
+  with(subset(res, padj<sigthresh & abs(log2FoldChange)>lfcthresh), points(log2FoldChange, -log10(pvalue), pch=20, col="green", ...))
+  if (labelsig) {
+    require(calibrate)
+    with(subset(res, padj<sigthresh & abs(log2FoldChange)>lfcthresh), textxy(log2FoldChange, -log10(pvalue), labs=Gene, cex=textcx, ...))
+  }
+  legend(legendpos, xjust=1, yjust=1, legend=c(paste("FDR<",sigthresh,sep=""), paste("|LogFC|>",lfcthresh,sep=""), "both"), pch=20, col=c("red","orange","green"))
+}
+
+
+
+volcanoplot(resdata, lfcthresh=1, sigthresh=0.05, textcx=.8, xlim=c(-2.3, 2))
+
+
+```
+
+
+# Pathway enrichment
+
+
+```{r}
+
+```
